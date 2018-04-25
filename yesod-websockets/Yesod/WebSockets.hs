@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
 module Yesod.WebSockets
     ( -- * Core API
       WebSocketsT
@@ -39,13 +40,13 @@ import           Control.Monad                  (forever, void, when)
 import           Control.Monad.IO.Class         (MonadIO (liftIO))
 import           Control.Monad.Trans.Control    (control)
 import           Control.Monad.Trans.Control    (MonadBaseControl (liftBaseWith, restoreM))
-import           Control.Monad.Trans.Reader     (ReaderT (ReaderT, runReaderT))
+import           Control.Monad.Trans.Reader     (ReaderT (ReaderT, runReaderT), ask)
 import qualified Data.Conduit                   as C
 import qualified Data.Conduit.List              as CL
 import qualified Network.Wai.Handler.WebSockets as WaiWS
 import qualified Network.WebSockets             as WS
 import qualified Yesod.Core                     as Y
-import           Control.Exception (SomeException)
+import           Control.Exception (SomeException, throwIO, try)
 import           Control.Exception.Enclosed (tryAny)
 
 -- | A transformer for a WebSockets handler.
@@ -213,8 +214,18 @@ sendCloseE = wrapWSE WS.sendClose
 -- | A @Source@ of WebSockets data from the user.
 --
 -- Since 0.1.0
-sourceWS :: (MonadIO m, WS.WebSocketsData a) => C.Producer (WebSocketsT m) a
-sourceWS = forever $ Y.lift receiveData >>= C.yield
+sourceWS :: forall m a. (MonadIO m, WS.WebSocketsData a) => C.Producer (WebSocketsT m) a
+sourceWS = do
+  conn <- Y.lift ask
+  r <- Y.liftIO . try . WS.receiveData $ conn
+  case r of
+    Left WS.ConnectionClosed -> pure ()  -- the connection was closed abruptly
+    Left WS.CloseRequest {}  -> pure ()  -- the connection was closed cleanly
+    Left e                   -> Y.liftIO . throwIO $ e
+    Right x                  -> do
+      C.yield x
+      sourceWS
+
 
 -- | A @Sink@ for sending textual data to the user.
 --
