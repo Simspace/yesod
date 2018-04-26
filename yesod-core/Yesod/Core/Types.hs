@@ -453,6 +453,10 @@ instance MonadMask m => MonadMask (HandlerT site m) where
   uninterruptibleMask a =
     HandlerT $ \e -> uninterruptibleMask $ \u -> unHandlerT (a $ q u) e
       where q u (HandlerT b) = HandlerT (u . b)
+  generalBracket acquire release body = HandlerT $ \e -> do
+    generalBracket (unHandlerT acquire e)
+                   (\resource exitCase -> unHandlerT (release resource exitCase) e)
+                   (\resource -> unHandlerT (body resource) e)
 instance MonadCatch m => MonadCatch (WidgetT site m) where
   catch (WidgetT m) c = WidgetT $ \r -> m r `catch` \e -> unWidgetT (c e) r
 instance MonadMask m => MonadMask (WidgetT site m) where
