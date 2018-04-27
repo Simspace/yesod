@@ -1,3 +1,24 @@
+## 1.4.16
+
+* Korean translation
+
+## 1.4.15
+
+* Added `Alternative` instance to `FormResult` to simplify handling pages with multiple forms.
+
+## 1.4.14
+
+* Added `WForm` to reduce the verbosity using monadic forms.
+* Added `wreq` and `wopt` correspondent functions for `WForm`.
+
+## 1.4.13
+
+* Fixed `textareaField` `writeHtmlEscapedChar` trim "\r"
+
+## 1.4.12
+
+* Password field does not remember its previous value
+
 ## 1.4.11
 
 * Fix warnings

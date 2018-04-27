@@ -1,3 +1,6 @@
+-- Ignore warnings about using deprecated byLabel/fileByLabel functions
+{-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
+
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
@@ -34,6 +37,7 @@ import Data.ByteString.Lazy.Char8 ()
 import qualified Data.Map as Map
 import qualified Text.HTML.DOM as HD
 import Network.HTTP.Types.Status (status301, status303, unsupportedMediaType415)
+import Control.Exception.Lifted(SomeException, try)
 
 parseQuery_ :: Text -> [[SelectorGroup]]
 parseQuery_ = either error id . parseQuery
@@ -149,6 +153,18 @@ main = hspec $ do
                     addToken
                 statusIs 200
                 bodyEquals "12345"
+            yit "labels WForm" $ do
+                get ("/wform" :: Text)
+                statusIs 200
+
+                request $ do
+                    setMethod "POST"
+                    setUrl ("/wform" :: Text)
+                    byLabel "Some WLabel" "12345"
+                    fileByLabel "Some WFile" "test/main.hs" "text/plain"
+                    addToken
+                statusIs 200
+                bodyEquals "12345"
             yit "finding html" $ do
                 get ("/html" :: Text)
                 statusIs 200
@@ -169,6 +185,16 @@ main = hspec $ do
                     addToken_ "body"
                 statusIs 200
                 bodyEquals "12345"
+            yit "can follow a link via clickOn" $ do
+              get ("/htmlWithLink" :: Text)
+              clickOn "a#thelink"
+              statusIs 200
+              bodyEquals "<html><head><title>Hello</title></head><body><p>Hello World</p><p>Hello Moon</p></body></html>"
+
+              get ("/htmlWithLink" :: Text)
+              (bad :: Either SomeException ()) <- try (clickOn "a#nonexistentlink")
+              assertEq "bad link" (isLeft bad) True
+
 
         ydescribe "utf8 paths" $ do
             yit "from path" $ do
@@ -192,6 +218,22 @@ main = hspec $ do
                     setMethod "POST"
                     setUrl ("/labels" :: Text)
                     byLabel "Foo Bar" "yes"
+        ydescribe "labels2" $ do
+            yit "fails with \"More than one label contained\" error" $ do
+                get ("/labels2" :: Text)
+                (bad :: Either SomeException ()) <- try (request $ do
+                    setMethod "POST"
+                    setUrl ("labels2" :: Text)
+                    byLabel "hobby" "fishing")
+                assertEq "failure wasn't called" (isLeft bad) True
+            yit "byLabelExact performs an exact match over the given label name" $ do
+                get ("/labels2" :: Text)
+                (bad :: Either SomeException ()) <- try (request $ do
+                    setMethod "POST"
+                    setUrl ("labels2" :: Text)
+                    byLabelExact "hobby" "fishing")
+                assertEq "failure was called" (isRight bad) True
+
         ydescribe "Content-Type handling" $ do
             yit "can set a content-type" $ do
                 request $ do
@@ -323,11 +365,24 @@ app = liteApp $ do
         case mfoo of
             FormSuccess (foo, _) -> return $ toHtml foo
             _ -> defaultLayout widget
+    onStatic "wform" $ dispatchTo $ do
+        ((mfoo, widget), _) <- runFormPost $ renderDivs $ wFormToAForm $ do
+          field1F <- wreq textField "Some WLabel" Nothing
+          field2F <- wreq fileField "Some WFile" Nothing
+
+          return $ (,) Control.Applicative.<$> field1F <*> field2F
+        case mfoo of
+            FormSuccess (foo, _) -> return $ toHtml foo
+            _                    -> defaultLayout widget
     onStatic "html" $ dispatchTo $
         return ("<html><head><title>Hello</title></head><body><p>Hello World</p><p>Hello Moon</p></body></html>" :: Text)
 
+    onStatic "htmlWithLink" $ dispatchTo $
+        return ("<html><head><title>A link</title></head><body><a href=\"/html\" id=\"thelink\">Link!</a></body></html>" :: Text)
     onStatic "labels" $ dispatchTo $
         return ("<html><label><input type='checkbox' name='fooname' id='foobar'>Foo Bar</label></html>" :: Text)
+    onStatic "labels2" $ dispatchTo $
+        return ("<html><label for='hobby'>hobby</label><label for='hobby2'>hobby2</label><input type='text' name='hobby' id='hobby'><input type='text' name='hobby2' id='hobby2'></html>" :: Text)
 
     onStatic "checkContentType" $ dispatchTo $ do
         headers <- requestHeaders <$> waiRequest

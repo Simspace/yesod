@@ -85,7 +85,7 @@ type Piece = Text
 
 -- | The result of an authentication based on credentials
 --
--- Since 1.4.4
+-- @since 1.4.4
 data AuthenticationResult master
     = Authenticated (AuthId master) -- ^ Authenticated successfully
     | UserError AuthMessage         -- ^ Invalid credentials provided by user
@@ -126,7 +126,7 @@ class (Yesod master, PathPiece (AuthId master), RenderMessage master FormMessage
     --
     -- Default implementation is in terms of @'getAuthId'@
     --
-    -- Since: 1.4.4
+    -- @since 1.4.4
     authenticate :: Creds master -> HandlerT master IO (AuthenticationResult master)
     authenticate creds = do
         muid <- getAuthId creds
@@ -166,7 +166,7 @@ class (Yesod master, PathPiece (AuthId master), RenderMessage master FormMessage
     -- >         when (isJust ma) $
     -- >             lift $ redirect HomeR   -- or any other Handler code you want
     -- >         defaultLoginHandler
-    -- 
+    --
     loginHandler :: HandlerT Auth (HandlerT master IO) Html
     loginHandler = defaultLoginHandler
 
@@ -181,6 +181,13 @@ class (Yesod master, PathPiece (AuthId master), RenderMessage master FormMessage
     -- 'loginDest' and 'logoutDest'. Default is 'False'.
     redirectToReferer :: master -> Bool
     redirectToReferer _ = False
+
+    -- | When being redirected to the login page should the current page
+    -- be set to redirect back to. Default is 'True'.
+    --                      
+    -- @since 1.4.21
+    redirectToCurrent :: master -> Bool
+    redirectToCurrent _ = True
 
     -- | Return an HTTP connection manager that is stored in the foundation
     -- type. This allows backends to reuse persistent connections. If none of
@@ -205,7 +212,7 @@ class (Yesod master, PathPiece (AuthId master), RenderMessage master FormMessage
     -- especially useful for creating an API to be accessed via some means
     -- other than a browser.
     --
-    -- Since 1.2.0
+    -- @since 1.2.0
     maybeAuthId :: HandlerT master IO (Maybe (AuthId master))
 
     default maybeAuthId
@@ -236,16 +243,17 @@ class (Yesod master, PathPiece (AuthId master), RenderMessage master FormMessage
 
 -- | Internal session key used to hold the authentication information.
 --
--- Since 1.2.3
+-- @since 1.2.3
 credsKey :: Text
 credsKey = "_ID"
 
 -- | Retrieves user credentials from the session, if user is authenticated.
 --
 -- This function does /not/ confirm that the credentials are valid, see
--- 'maybeAuthIdRaw' for more information.
+-- 'maybeAuthIdRaw' for more information. The first call in a request
+-- does a database request to make sure that the account is still in the database.
 --
--- Since 1.1.2
+-- @since 1.1.2
 defaultMaybeAuthId
     :: (YesodAuthPersist master, Typeable (AuthEntity master))
     => HandlerT master IO (Maybe (AuthId master))
@@ -270,7 +278,7 @@ cachedAuth
 -- This is the default 'loginHandler'.  It concatenates plugin widgets and
 -- wraps the result in 'authLayout'.  See 'loginHandler' for more details.
 --
--- Since 1.4.9
+-- @since 1.4.9
 defaultLoginHandler :: AuthHandler master Html
 defaultLoginHandler = do
     tp <- getRouteToParent
@@ -391,7 +399,7 @@ authLayoutJson w json = selectRep $ do
 
 -- | Clears current user credentials for the session.
 --
--- Since 1.1.7
+-- @since 1.1.7
 clearCreds :: YesodAuth master
            => Bool -- ^ if HTTP redirect to 'logoutDest' should be done
            -> HandlerT master IO ()
@@ -450,7 +458,7 @@ handlePluginR plugin pieces = do
 -- with the user\'s database identifier to get the value in the database. This
 -- assumes that you are using a Persistent database.
 --
--- Since 1.1.0
+-- @since 1.1.0
 maybeAuth :: ( YesodAuthPersist master
              , val ~ AuthEntity master
              , Key val ~ AuthId master
@@ -464,7 +472,7 @@ maybeAuth = runMaybeT $ do
 -- | Similar to 'maybeAuth', but doesn’t assume that you are using a
 -- Persistent database.
 --
--- Since 1.4.0
+-- @since 1.4.0
 maybeAuthPair :: (YesodAuthPersist master, Typeable (AuthEntity master))
               => HandlerT master IO (Maybe (AuthId master, AuthEntity master))
 maybeAuthPair = runMaybeT $ do
@@ -485,7 +493,7 @@ newtype CachedMaybeAuth val = CachedMaybeAuth { unCachedMaybeAuth :: Maybe val }
 -- given value.  This is the common case in Yesod, and means that you can
 -- easily look up the full information on a given user.
 --
--- Since 1.4.0
+-- @since 1.4.0
 class (YesodAuth master, YesodPersist master) => YesodAuthPersist master where
     -- | If the @AuthId@ for a given site is a persistent ID, this will give the
     -- value for that entity. E.g.:
@@ -493,7 +501,7 @@ class (YesodAuth master, YesodPersist master) => YesodAuthPersist master where
     -- > type AuthId MySite = UserId
     -- > AuthEntity MySite ~ User
     --
-    -- Since 1.2.0
+    -- @since 1.2.0
     type AuthEntity master :: *
     type AuthEntity master = KeyEntity (AuthId master)
 
@@ -526,14 +534,14 @@ type instance KeyEntity (Key x) = x
 -- | Similar to 'maybeAuthId', but redirects to a login page if user is not
 -- authenticated or responds with error 401 if this is an API client (expecting JSON).
 --
--- Since 1.1.0
+-- @since 1.1.0
 requireAuthId :: YesodAuth master => HandlerT master IO (AuthId master)
 requireAuthId = maybeAuthId >>= maybe handleAuthLack return
 
 -- | Similar to 'maybeAuth', but redirects to a login page if user is not
 -- authenticated or responds with error 401 if this is an API client (expecting JSON).
 --
--- Since 1.1.0
+-- @since 1.1.0
 requireAuth :: ( YesodAuthPersist master
                , val ~ AuthEntity master
                , Key val ~ AuthId master
@@ -545,20 +553,20 @@ requireAuth = maybeAuth >>= maybe handleAuthLack return
 -- | Similar to 'requireAuth', but not tied to Persistent's 'Entity' type.
 -- Instead, the 'AuthId' and 'AuthEntity' are returned in a tuple.
 --
--- Since 1.4.0
+-- @since 1.4.0
 requireAuthPair :: (YesodAuthPersist master, Typeable (AuthEntity master))
                 => HandlerT master IO (AuthId master, AuthEntity master)
 requireAuthPair = maybeAuthPair >>= maybe handleAuthLack return
 
-handleAuthLack :: Yesod master => HandlerT master IO a
+handleAuthLack :: YesodAuth master => HandlerT master IO a
 handleAuthLack = do
     aj <- acceptsJson
     if aj then notAuthenticated else redirectLogin
 
-redirectLogin :: Yesod master => HandlerT master IO a
+redirectLogin :: YesodAuth master => HandlerT master IO a
 redirectLogin = do
     y <- getYesod
-    setUltDestCurrent
+    when (redirectToCurrent y) setUltDestCurrent
     case authRoute y of
         Just z -> redirect z
         Nothing -> permissionDenied "Please configure authRoute"

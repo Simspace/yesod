@@ -1,3 +1,25 @@
+## 1.5.9.1
+
+* Fixes a Haddock syntax error in 1.5.9 [#1473](https://github.com/yesodweb/yesod/pull/1473)
+
+## 1.5.9
+* Add byLabelExact and related functions
+[#1459](https://github.com/yesodweb/yesod/pull/1459)
+
+## 1.5.8
+* Added implicit parameter HasCallStack to assertions.
+[#1421](https://github.com/yesodweb/yesod/pull/1421)
+
+## 1.5.7
+
+* Add clickOn.
+[#1408](https://github.com/yesodweb/yesod/pull/1408)
+
+## 1.5.6
+
+* Add assertNotEq.
+[#1375](https://github.com/yesodweb/yesod/pull/1375)
+
 ## 1.5.5
 
 * Fix warnings

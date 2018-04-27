@@ -10,6 +10,7 @@
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE RankNTypes                 #-}
 {-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
 ---------------------------------------------------------
 --
 -- Module        : Yesod.Handler
@@ -114,6 +115,7 @@ module Yesod.Core.Handler
     , deleteCookie
     , addHeader
     , setHeader
+    , replaceOrAddHeader
     , setLanguage
       -- ** Content caching and expiration
     , cacheSeconds
@@ -121,6 +123,7 @@ module Yesod.Core.Handler
     , alreadyExpired
     , expiresAt
     , setEtag
+    , setWeakEtag
       -- * Session
     , SessionMap
     , lookupSession
@@ -206,7 +209,7 @@ import Control.Monad.Trans.Class (lift)
 
 import           Data.Aeson                    (ToJSON(..))
 import qualified Data.Text                     as T
-import           Data.Text.Encoding            (decodeUtf8With, encodeUtf8)
+import           Data.Text.Encoding            (decodeUtf8With, encodeUtf8, decodeUtf8)
 import           Data.Text.Encoding.Error      (lenientDecode)
 import qualified Data.Text.Lazy                as TL
 import           Text.Blaze.Html.Renderer.Utf8 (renderHtml)
@@ -239,7 +242,7 @@ import           Yesod.Core.Types
 import           Yesod.Routes.Class            (Route)
 import           Blaze.ByteString.Builder (Builder)
 import           Safe (headMay)
-import           Data.CaseInsensitive (CI)
+import           Data.CaseInsensitive (CI, original)
 import qualified Data.Conduit.List as CL
 import           Control.Monad.Trans.Resource  (MonadResource, InternalState, runResourceT, withInternalState, getInternalState, liftResourceT, resourceForkIO)
 import qualified System.PosixCompat.Files as PC
@@ -787,6 +790,40 @@ setHeader :: MonadHandler m => Text -> Text -> m ()
 setHeader = addHeader
 {-# DEPRECATED setHeader "Please use addHeader instead" #-}
 
+-- | Replace an existing header with a new value or add a new header
+-- if not present.
+--
+-- Note that, while the data type used here is 'Text', you must provide only
+-- ASCII value to be HTTP compliant.
+--
+-- @since 1.4.36
+replaceOrAddHeader :: MonadHandler m => Text -> Text -> m ()
+replaceOrAddHeader a b =
+  modify $ \g -> g {ghsHeaders = replaceHeader (ghsHeaders g)}
+  where
+    repHeader = Header (encodeUtf8 a) (encodeUtf8 b)
+
+    sameHeaderName :: Header -> Header -> Bool
+    sameHeaderName (Header n1 _) (Header n2 _) = T.toLower (decodeUtf8 n1) == T.toLower (decodeUtf8 n2)
+    sameHeaderName _ _ = False
+
+    replaceIndividualHeader :: [Header] -> [Header]
+    replaceIndividualHeader [] = [repHeader]
+    replaceIndividualHeader xs = aux xs []
+      where
+        aux [] acc = acc ++ [repHeader]
+        aux (x:xs') acc =
+          if sameHeaderName repHeader x
+            then acc ++
+                 [repHeader] ++
+                 (filter (\header -> not (sameHeaderName header repHeader)) xs')
+            else aux xs' (acc ++ [x])
+
+    replaceHeader :: Endo [Header] -> Endo [Header]
+    replaceHeader endo =
+      let allHeaders :: [Header] = appEndo endo []
+      in Endo (\rest -> replaceIndividualHeader allHeaders ++ rest)
+
 -- | Set the Cache-Control header to indicate this response should be cached
 -- for the given number of seconds.
 cacheSeconds :: MonadHandler m => Int -> m ()
@@ -815,12 +852,24 @@ alreadyExpired = setHeader "Expires" "Thu, 01 Jan 1970 05:05:05 GMT"
 expiresAt :: MonadHandler m => UTCTime -> m ()
 expiresAt = setHeader "Expires" . formatRFC1123
 
+data Etag
+  = WeakEtag !S.ByteString
+  -- ^ Prefixed by W/ and surrounded in quotes. Signifies that contents are
+  -- semantically identical but make no guarantees about being bytewise identical.
+  | StrongEtag !S.ByteString
+  -- ^ Signifies that contents should be byte-for-byte identical if they match
+  -- the provided ETag
+  | InvalidEtag !S.ByteString
+  -- ^ Anything else that ends up in a header that expects an ETag but doesn't
+  -- properly follow the ETag format specified in RFC 7232, section 2.3
+  deriving (Show, Eq)
+
 -- | Check the if-none-match header and, if it matches the given value, return
 -- a 304 not modified response. Otherwise, set the etag header to the given
 -- value.
 --
 -- Note that it is the responsibility of the caller to ensure that the provided
--- value is a value etag value, no sanity checking is performed by this
+-- value is a valid etag value, no sanity checking is performed by this
 -- function.
 --
 -- @since 1.4.4
@@ -828,22 +877,53 @@ setEtag :: MonadHandler m => Text -> m ()
 setEtag etag = do
     mmatch <- lookupHeader "if-none-match"
     let matches = maybe [] parseMatch mmatch
-    if encodeUtf8 etag `elem` matches
+        baseTag = encodeUtf8 etag
+        strongTag = StrongEtag baseTag
+        badTag = InvalidEtag baseTag
+    if any (\tag -> tag == strongTag || tag == badTag) matches
         then notModified
         else addHeader "etag" $ T.concat ["\"", etag, "\""]
 
--- | Parse an if-none-match field according to the spec. Does not parsing on
--- weak matches, which are not supported by setEtag.
-parseMatch :: S.ByteString -> [S.ByteString]
+
+-- | Parse an if-none-match field according to the spec.
+parseMatch :: S.ByteString -> [Etag]
 parseMatch =
     map clean . S.split W8._comma
   where
-    clean = stripQuotes . fst . S.spanEnd W8.isSpace . S.dropWhile W8.isSpace
+    clean = classify . fst . S.spanEnd W8.isSpace . S.dropWhile W8.isSpace
 
-    stripQuotes bs
+    classify bs
         | S.length bs >= 2 && S.head bs == W8._quotedbl && S.last bs == W8._quotedbl
-            = S.init $ S.tail bs
-        | otherwise = bs
+            = StrongEtag $ S.init $ S.tail bs
+        | S.length bs >= 4 &&
+          S.head bs == W8._W &&
+          S.index bs 1 == W8._slash &&
+          S.index bs 2 == W8._quotedbl &&
+          S.last bs == W8._quotedbl
+            = WeakEtag $ S.init $ S.drop 3 bs
+        | otherwise = InvalidEtag bs
+
+-- | Check the if-none-match header and, if it matches the given value, return
+-- a 304 not modified response. Otherwise, set the etag header to the given
+-- value.
+--
+-- A weak etag is only expected to be semantically identical to the prior content,
+-- but doesn't have to be byte-for-byte identical. Therefore it can be useful for
+-- dynamically generated content that may be difficult to perform bytewise hashing
+-- upon.
+--
+-- Note that it is the responsibility of the caller to ensure that the provided
+-- value is a valid etag value, no sanity checking is performed by this
+-- function.
+--
+-- @since 1.4.37
+setWeakEtag :: MonadHandler m => Text -> m ()
+setWeakEtag etag = do
+    mmatch <- lookupHeader "if-none-match"
+    let matches = maybe [] parseMatch mmatch
+    if WeakEtag (encodeUtf8 etag) `elem` matches
+        then notModified
+        else addHeader "etag" $ T.concat ["W/\"", etag, "\""]
 
 -- | Set a variable in the user's session.
 --
@@ -999,7 +1079,7 @@ getMessageRender :: (MonadHandler m, RenderMessage (HandlerSite m) message)
                  => m (message -> Text)
 getMessageRender = do
     env <- askHandlerEnv
-    l <- reqLangs <$> getRequest
+    l <- languages
     return $ renderMessage (rheSite env) l
 
 -- | Use a per-request cache to avoid performing the same action multiple times.
@@ -1050,14 +1130,14 @@ cachedBy k action = do
 
 -- | Get the list of supported languages supplied by the user.
 --
--- Languages are determined based on the following three (in descending order
+-- Languages are determined based on the following (in descending order
 -- of preference):
+--
+-- * The _LANG user session variable.
 --
 -- * The _LANG get parameter.
 --
 -- * The _LANG cookie.
---
--- * The _LANG user session variable.
 --
 -- * Accept-Language HTTP header.
 --
@@ -1384,6 +1464,23 @@ stripHandlerT (HandlerT f) getSub toMaster newRoute = HandlerT $ \hd -> do
 -- The form-based approach has the advantage of working for users with Javascript disabled, while adding the token to the headers with Javascript allows things like submitting JSON or binary data in AJAX requests. Yesod supports checking for a CSRF token in either the POST parameters of the form ('checkCsrfParamNamed'), the headers ('checkCsrfHeaderNamed'), or both options ('checkCsrfHeaderOrParam').
 --
 -- The easiest way to check both sources is to add the 'Yesod.Core.defaultCsrfMiddleware' to your Yesod Middleware.
+--
+-- === Opting-out of CSRF checking for specific routes
+--
+-- (Note: this code is generic to opting out of any Yesod middleware)
+--
+-- @
+-- 'yesodMiddleware' app = do
+--   maybeRoute <- 'getCurrentRoute'
+--   let dontCheckCsrf = case maybeRoute of
+--                         Just HomeR                     -> True  -- Don't check HomeR
+--                         Nothing                        -> True  -- Don't check for 404s
+--                         _                              -> False -- Check other routes
+--
+--   'defaultYesodMiddleware' $ 'defaultCsrfSetCookieMiddleware' $ (if dontCheckCsrf then 'id' else 'defaultCsrfCheckMiddleware') $ app
+-- @
+--
+-- This can also be implemented using the 'csrfCheckMiddleware' function.
 
 -- | The default cookie name for the CSRF token ("XSRF-TOKEN").
 --
@@ -1421,18 +1518,22 @@ defaultCsrfHeaderName = "X-XSRF-TOKEN"
 -- @since 1.4.14
 checkCsrfHeaderNamed :: MonadHandler m => CI S8.ByteString -> m ()
 checkCsrfHeaderNamed headerName = do
-  valid <- hasValidCsrfHeaderNamed headerName
-  unless valid (permissionDenied csrfErrorMessage)
+  (valid, mHeader) <- hasValidCsrfHeaderNamed' headerName
+  unless valid (permissionDenied $ csrfErrorMessage [CSRFHeader (decodeUtf8 $ original headerName) mHeader])
 
 -- | Takes a header name to lookup a CSRF token, and returns whether the value matches the token stored in the session.
 --
 -- @since 1.4.14
 hasValidCsrfHeaderNamed :: MonadHandler m => CI S8.ByteString -> m Bool
-hasValidCsrfHeaderNamed headerName = do
+hasValidCsrfHeaderNamed headerName = fst <$> hasValidCsrfHeaderNamed' headerName
+
+-- | Like 'hasValidCsrfHeaderNamed', but also returns the header value to be used in error messages.
+hasValidCsrfHeaderNamed' :: MonadHandler m => CI S8.ByteString -> m (Bool, Maybe Text)
+hasValidCsrfHeaderNamed' headerName = do
   mCsrfToken  <- reqToken <$> getRequest
   mXsrfHeader <- lookupHeader headerName
 
-  return $ validCsrf mCsrfToken mXsrfHeader
+  return $ (validCsrf mCsrfToken mXsrfHeader, decodeUtf8 <$> mXsrfHeader)
 
 -- CSRF Parameter checking
 
@@ -1448,18 +1549,22 @@ defaultCsrfParamName = "_token"
 -- @since 1.4.14
 checkCsrfParamNamed :: MonadHandler m => Text -> m ()
 checkCsrfParamNamed paramName = do
-  valid <- hasValidCsrfParamNamed paramName
-  unless valid (permissionDenied csrfErrorMessage)
+  (valid, mParam) <- hasValidCsrfParamNamed' paramName
+  unless valid (permissionDenied $ csrfErrorMessage [CSRFParam paramName mParam])
 
 -- | Takes a POST parameter name to lookup a CSRF token, and returns whether the value matches the token stored in the session.
 --
 -- @since 1.4.14
 hasValidCsrfParamNamed :: MonadHandler m => Text -> m Bool
-hasValidCsrfParamNamed paramName = do
+hasValidCsrfParamNamed paramName = fst <$> hasValidCsrfParamNamed' paramName
+
+-- | Like 'hasValidCsrfParamNamed', but also returns the param value to be used in error messages.
+hasValidCsrfParamNamed' :: MonadHandler m => Text -> m (Bool, Maybe Text)
+hasValidCsrfParamNamed' paramName = do
   mCsrfToken  <- reqToken <$> getRequest
   mCsrfParam <- lookupPostParam paramName
 
-  return $ validCsrf mCsrfToken (encodeUtf8 <$> mCsrfParam)
+  return $ (validCsrf mCsrfToken (encodeUtf8 <$> mCsrfParam), mCsrfParam)
 
 -- | Checks that a valid CSRF token is present in either the request headers or POST parameters.
 -- If the value doesn't match the token stored in the session, this function throws a 'PermissionDenied' error.
@@ -1470,11 +1575,12 @@ checkCsrfHeaderOrParam :: (MonadHandler m, MonadLogger m)
                        -> Text -- ^ The POST parameter name to lookup the CSRF token
                        -> m ()
 checkCsrfHeaderOrParam headerName paramName = do
-  validHeader <- hasValidCsrfHeaderNamed headerName
-  validParam <- hasValidCsrfParamNamed paramName
+  (validHeader, mHeader) <- hasValidCsrfHeaderNamed' headerName
+  (validParam, mParam) <- hasValidCsrfParamNamed' paramName
   unless (validHeader || validParam) $ do
-    $logWarnS "yesod-core" csrfErrorMessage
-    permissionDenied csrfErrorMessage
+    let errorMessage = csrfErrorMessage $ [CSRFHeader (decodeUtf8 $ original headerName) mHeader, CSRFParam paramName mParam]
+    $logWarnS "yesod-core" errorMessage
+    permissionDenied errorMessage
 
 validCsrf :: Maybe Text -> Maybe S.ByteString -> Bool
 -- It's important to use constant-time comparison (constEqBytes) in order to avoid timing attacks.
@@ -1482,5 +1588,25 @@ validCsrf (Just token) (Just param) = encodeUtf8 token `constEqBytes` param
 validCsrf Nothing            _param = True
 validCsrf (Just _token)     Nothing = False
 
-csrfErrorMessage :: Text
-csrfErrorMessage = "A valid CSRF token wasn't present in HTTP headers or POST parameters. Because the request could have been forged, it's been rejected altogether. Check the Yesod.Core.Handler docs of the yesod-core package for details on CSRF protection."
+data CSRFExpectation = CSRFHeader Text (Maybe Text) -- Key/Value
+                     | CSRFParam Text (Maybe Text) -- Key/Value
+
+csrfErrorMessage :: [CSRFExpectation]
+                  -> Text -- ^ Error message
+csrfErrorMessage expectedLocations = T.intercalate "\n"
+  [ "A valid CSRF token wasn't present. Because the request could have been forged, it's been rejected altogether."
+  , "If you're a developer of this site, these tips will help you debug the issue:"
+  , "- Read the Yesod.Core.Handler docs of the yesod-core package for details on CSRF protection."
+  , "- Check that your HTTP client is persisting cookies between requests, like a browser does."
+  , "- By default, the CSRF token is sent to the client in a cookie named " `mappend` (decodeUtf8 defaultCsrfCookieName) `mappend` "."
+  , "- The server is looking for the token in the following locations:\n" `mappend` T.intercalate "\n" (map csrfLocation expectedLocations)
+  ]
+
+  where csrfLocation expected = case expected of
+          CSRFHeader k v -> T.intercalate " " ["  - An HTTP header named", k, (formatValue v)]
+          CSRFParam k v -> T.intercalate " " ["  - A POST parameter named", k, (formatValue v)]
+
+        formatValue :: Maybe Text -> Text
+        formatValue maybeText = case maybeText of
+          Nothing -> "(which is not currently set)"
+          Just t -> T.concat ["(which has the current, incorrect value: '", t, "')"]
